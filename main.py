@@ -7,34 +7,44 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from datetime import datetime
 import aiohttp
 
-# Данные из переменных Bothost
+# Настройки из переменных Bothost
 TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = os.getenv("ADMIN_ID") # Твой числовой ID
-CHANNEL_ID = os.getenv("CHANNEL_ID") # ID канала
+ADMIN_ID = os.getenv("ADMIN_ID")
+
+raw_channel_id = os.getenv("CHANNEL_ID")
+try:
+    CHANNEL_ID = int(raw_channel_id)
+except (ValueError, TypeError):
+    CHANNEL_ID = raw_channel_id
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Глобальная переменная для статистики
 stats = {"posts": 0, "start_time": datetime.now().strftime("%d.%m.%Y %H:%M")}
 
 async def get_usdt_price():
-    url = "https://api.binance.com/api/v3/ticker/price?symbol=USDTRUB"
+    """Получаем курс напрямую с CoinGecko (как на твоем скриншоте)"""
+    url = "https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=rub"
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(url) as response:
+            async with session.get(url, timeout=10) as response:
                 if response.status == 200:
                     data = await response.json()
-                    return float(data['price'])
+                    # Извлекаем цену из формата {"tether": {"rub": 71.04}}
+                    price = data['tether']['rub']
+                    return float(price)
+                else:
+                    logging.error(f"CoinGecko ошибка: {response.status}")
+                    return None
         except Exception as e:
-            logging.error(f"Ошибка API: {e}")
+            logging.error(f"Ошибка запроса к CoinGecko: {e}")
             return None
 
-# Функция отправки поста
 async def post_price():
     price = await get_usdt_price()
     if price:
+        # Формат: 71.04₽ (1.00$)
         text = f"<b>{round(price, 2)}₽ (1.00$)</b>"
         try:
             await bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode="HTML")
@@ -44,64 +54,50 @@ async def post_price():
             logging.error(f"Ошибка отправки: {e}")
     return False
 
-# Фоновая задача
 async def auto_post_rate():
     while True:
         await post_price()
-        await asyncio.sleep(300)
+        await asyncio.sleep(300) # 5 минут
 
 # --- АДМИН ПАНЕЛЬ ---
 
 def get_admin_kb():
     builder = InlineKeyboardBuilder()
     builder.row(types.InlineKeyboardButton(text="🚀 Опубликовать сейчас", callback_data="post_now"))
-    builder.row(types.InlineKeyboardButton(text="📊 Статус и инфо", callback_data="status"))
-    builder.row(types.InlineKeyboardButton(text="📢 Перейти в канал", url=f"https://t.me/{str(CHANNEL_ID).replace('-100', '')}"))
+    builder.row(types.InlineKeyboardButton(text="📊 Статус", callback_data="status"))
     return builder.as_markup()
 
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
-    # Проверка на админа
     if str(message.from_user.id) != str(ADMIN_ID):
-        await message.answer("У вас нет доступа к управлению этим ботом.")
         return
-
-    await message.answer(
-        f"👋 <b>Админ-панель</b>\n\nБот работает в канале <code>{CHANNEL_ID}</code>\nИнтервал: 5 минут.",
-        reply_markup=get_admin_kb(),
-        parse_mode="HTML"
-    )
+    await message.answer(f"⚙️ <b>Админка (CoinGecko)</b>\nКанал: <code>{CHANNEL_ID}</code>", 
+                         reply_markup=get_admin_kb(), parse_mode="HTML")
 
 @dp.callback_query(F.data == "post_now")
 async def call_post_now(callback: types.CallbackQuery):
-    if str(callback.from_user.id) != str(ADMIN_ID): return
-    
+    await callback.answer("⏳ Запрос к CoinGecko...")
     success = await post_price()
     if success:
-        await callback.answer("✅ Опубликовано!")
+        await callback.message.answer("✅ Курс отправлен в канал!")
     else:
-        await callback.answer("❌ Ошибка при публикации")
+        await callback.message.answer("❌ Ошибка получения данных.")
 
 @dp.callback_query(F.data == "status")
 async def call_status(callback: types.CallbackQuery):
-    if str(callback.from_user.id) != str(ADMIN_ID): return
-    
     status_text = (
-        f"ℹ️ <b>Информация:</b>\n\n"
+        f"ℹ️ <b>Инфо (CoinGecko):</b>\n"
         f"🔹 Канал: <code>{CHANNEL_ID}</code>\n"
-        f"🔹 Постов с запуска: {stats['posts']}\n"
-        f"🔹 Бот запущен: {stats['start_time']}\n"
-        f"🔹 Статус: Работает ✅"
+        f"🔹 Постов сделано: {stats['posts']}\n"
+        f"🔹 Источник: CoinGecko API\n"
+        f"🕒 Время: {datetime.now().strftime('%H:%M:%S')}"
     )
-    await callback.message.edit_text(status_text, reply_markup=get_admin_kb(), parse_mode="HTML")
+    try:
+        await callback.message.edit_text(status_text, reply_markup=get_admin_kb(), parse_mode="HTML")
+    except Exception:
+        await callback.answer("Данные не изменились")
 
 async def main():
-    # Уведомление админа о запуске
-    try:
-        await bot.send_message(ADMIN_ID, "✅ Бот успешно запущен и начал работу!")
-    except:
-        pass
-        
     asyncio.create_task(auto_post_rate())
     await dp.start_polling(bot)
 
